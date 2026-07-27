@@ -223,12 +223,26 @@ Interactive docs at `/docs` (Swagger UI) once the API is running.
 
 ---
 
-## Deploying
+## Continuous Integration
 
-CI/CD is wired in `.github/workflows/deploy.yml`: on push to `main`,
-pytest runs first; only on green does it build the Docker image and
-`gcloud run deploy`. Requires repo secrets: `GCP_PROJECT_ID`,
-`GCP_SA_KEY` (service account JSON), `OPENAI_API_KEY`.
+CI is wired in `.github/workflows/deploy.yml`, with two jobs:
+
+1. **`test`** — installs dependencies and runs the full pytest suite
+   (28 tests) on every push and pull request against `main`.
+2. **`build-and-verify-stack`** — runs only if `test` passes. Mirrors the
+   "Run the full stack with Docker" workflow above (the CI equivalent of
+   `make up`): builds every image with `docker compose up --build -d`,
+   then polls each service's health endpoint (API, Streamlit, Prometheus,
+   Grafana) until all four report healthy, confirms `/metrics` is
+   scrapeable, then tears everything down. This validates that the
+   Dockerfile and `docker-compose.yml` actually produce a working stack
+   on every push — no external cloud deployment involved.
+
+Only repo secret needed: `OPENAI_API_KEY` (used so the API container has
+a key available at boot; the CI job only exercises `/health` and
+`/metrics`, not real `/ingest` calls, so a valid key isn't strictly
+required for the smoke test to pass — but the container should still
+build and start cleanly either way).
 
 See `BUILD_NOTE.md` for what shipped, key decisions, and known
 limitations.
