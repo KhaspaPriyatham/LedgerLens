@@ -166,7 +166,7 @@ rejected).
 | `make down` | Stop and remove all containers (volumes persist) |
 | `make restart` | `down` then `up` |
 | `make rebuild` | Clean rebuild, no Docker layer cache |
-| `make reset-data` | Wipe all documents/uploads/Grafana state for a clean demo — dashboard auto-reprovisions |
+| `make reset-data` | Wipe all documents/uploads/Grafana state for new/fresh start — dashboard auto-reprovisions |
 | `make logs` | Tail logs from every service |
 | `make ps` | Show container status |
 
