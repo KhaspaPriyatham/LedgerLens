@@ -246,3 +246,8 @@ build and start cleanly either way).
 
 See `BUILD_NOTE.md` for what shipped, key decisions, and known
 limitations.
+
+See `VALIDATION_PLAN.md` for a full gap analysis against the original
+brief plus root-cause analysis and a concrete fix plan for known issues
+(Review Queue image loading, approve/reject visibility, Upload-tab state
+handling, and a UI polish pass).
