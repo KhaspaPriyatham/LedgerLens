@@ -62,6 +62,19 @@ reference material and sit outside this build's definition of done.
   are computed in-memory over a bounded deque — correct for a single
   replica; multi-replica deployment would need Redis or Prometheus
   queries instead.
+- CI (`.github/workflows/deploy.yml`) builds and starts the full Docker
+  Compose stack on every push as a smoke test, but doesn't deploy
+  anywhere external — there's no live cloud environment for this build.
+  Deploying to Cloud Run, Render, or Railway is documented as the next
+  step but wasn't executed from the development environment used here.
+- Reviewer corrections to top-level fields (e.g. vendor) are applied
+  directly; corrections to nested line-item fields are recorded in an
+  audit trail but not yet rewritten into the structured `line_items`
+  array.
+- Rolling metrics (`throughput_docs_per_minute`, `auto_approval_rate`)
+  are computed in-memory over a bounded deque — correct for a single
+  replica; multi-replica deployment would need Redis or Prometheus
+  queries instead.
 - A live `gcloud run deploy` was not executed from the development
   environment (no GCP credentials there); the Dockerfile and workflow
   file are written and locally verified to build correctly, but the
