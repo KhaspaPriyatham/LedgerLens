@@ -1,7 +1,22 @@
 # LedgerLens — Validation & Fix Plan
 
-**Status:** Draft for review · **Scope:** Gap analysis against the IITR-SE-2509 Cohort C · C·02 "LedgerLens" capstone brief, plus root-cause analysis and a concrete fix plan for four reported defects and one requested UX pass.
+**Status:** Implemented · **Scope:** Gap analysis against the IITR-SE-2509 Cohort C · C·02 "LedgerLens" capstone brief, plus root-cause analysis and a concrete fix plan for four reported defects and one requested UX pass.
 **Audience:** Anyone picking up this repo cold — every finding below cites the exact file/line it comes from and includes a copy-pasteable fix.
+
+**Implementation status (updated after landing the fixes):**
+
+| Phase | Item | Status |
+|---|---|---|
+| P0 | SQLite/Docker volume path mismatch (§6.1) | ✅ Done — `docker-compose.yml` |
+| P1 | Review Queue image loading (§5.1) | ✅ Done — `GET /documents/{id}/image` + Streamlit fetches over HTTP |
+| P1 | Upload tab premature clearing (§5.3) | ✅ Done — sticky `last_extraction_image` / `last_error` in session state |
+| P1 | Approve/Reject accepted/rejected visibility (§5.2) | ✅ Done — `GET /documents` + Accepted/Rejected tabs |
+| P2 | UI polish (§5.4) | ✅ Done — `.streamlit/config.toml` theme, status badges, KPI row, card layout, sidebar |
+| P3 | Nested line-item correction write-back (§6.2) | ✅ Done — `/approve` parses `line_items[<idx>].<field>` and writes into structured data |
+| P3 | Cloud Run deploy job in CI (§6.3) | ⏸ Not done — needs a decision on GCP credentials as repo secrets; left as documented optional follow-up |
+| P3 | Batch mode (§6.5) | ⏸ Not done — optional per the brief, not core |
+
+Test suite grew from 28 → 34 tests (all passing); see §8 for what was added.
 
 ---
 

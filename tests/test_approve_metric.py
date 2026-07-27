@@ -1,5 +1,7 @@
 from fastapi.testclient import TestClient
 
+from tests.conftest import metric_value
+
 
 def test_approve_increments_reviewed_metric(monkeypatch, tmp_path):
     import os
@@ -46,6 +48,15 @@ def test_approve_increments_reviewed_metric(monkeypatch, tmp_path):
             doc_id = ingest_resp.json()["document_id"]
             assert ingest_resp.json()["status"] == "pending_review"
 
+        # snapshot the Prometheus counter *before* approving -- the shared
+        # registry accumulates across every test in this process, so the
+        # only thing this test can safely assert is that the counter goes
+        # up by exactly 1, not what its absolute value is (see tests/conftest.py).
+        before = metric_value(
+            generate_latest(main_module.registry).decode("utf-8"),
+            "documents_reviewed_total", outcome="approved",
+        )
+
         approve_resp = client.post("/approve", json={"document_id": doc_id, "field_updates": [], "reviewer": "Bob"})
         assert approve_resp.status_code == 200
         assert approve_resp.json()["status"] == "approved"
@@ -55,5 +66,8 @@ def test_approve_increments_reviewed_metric(monkeypatch, tmp_path):
         assert not any(d["document_id"] == doc_id for d in review_resp.json())
 
         # confirm the Prometheus counter incremented
-        metrics_text = generate_latest(main_module.registry).decode("utf-8")
-        assert 'documents_reviewed_total{outcome="approved"} 1.0' in metrics_text
+        after = metric_value(
+            generate_latest(main_module.registry).decode("utf-8"),
+            "documents_reviewed_total", outcome="approved",
+        )
+        assert after == before + 1

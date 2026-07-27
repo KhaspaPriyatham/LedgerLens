@@ -1,9 +1,10 @@
+import os
 import time
 from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from sqlalchemy.orm import Session
 
 from app.config import UPLOADS_DIR, REVIEW_THRESHOLD
@@ -192,6 +193,32 @@ def get_review_queue(db: Session = Depends(get_db)):
     return result
 
 
+@app.get("/documents")
+def list_documents(status: str | None = None, limit: int = 50, db: Session = Depends(get_db)):
+    """List documents, optionally filtered by status (e.g. "approved",
+    "rejected", "auto_approved", "pending_review", "blocked"). Backs the
+    Streamlit "Accepted" / "Rejected" views so approved/rejected documents
+    are actually browsable somewhere, not just removed from /review."""
+    query = db.query(Document)
+    if status:
+        query = query.filter(Document.status == status)
+    docs = query.order_by(Document.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "status": doc.status,
+            "vendor": doc.vendor,
+            "total": doc.total,
+            "currency": doc.currency,
+            "created_at": doc.created_at.isoformat() if doc.created_at else None,
+            "extracted_json": doc.extracted_json,
+            "reviewed_json": doc.reviewed_json,
+        }
+        for doc in docs
+    ]
+
+
 @app.get("/documents/{document_id}", response_model=DocumentRecord)
 def get_document(document_id: str, db: Session = Depends(get_db)):
     doc = db.query(Document).filter(Document.id == document_id).first()
@@ -212,6 +239,19 @@ def get_document(document_id: str, db: Session = Depends(get_db)):
     )
 
 
+@app.get("/documents/{document_id}/image")
+def get_document_image(document_id: str, db: Session = Depends(get_db)):
+    """Serve the watermarked source image over HTTP rather than requiring
+    the caller to have direct filesystem access to the API's uploads/
+    directory. This is what makes the Review Queue / Accepted / Rejected
+    UIs work regardless of whether the frontend and API share a disk
+    (they don't, in general -- e.g. on Cloud Run)."""
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc or not doc.image_path or not os.path.exists(doc.image_path):
+        raise HTTPException(status_code=404, detail="Image not found for this document")
+    return FileResponse(doc.image_path, media_type="image/png")
+
+
 @app.post("/approve")
 def approve(request: ApproveRequest, db: Session = Depends(get_db)):
     doc = db.query(Document).filter(Document.id == request.document_id).first()
@@ -219,14 +259,25 @@ def approve(request: ApproveRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Document not found")
 
     import json
+    import re
 
     record = json.loads(doc.extracted_json) if doc.extracted_json else {}
+    line_item_path_re = re.compile(r"^line_items\[(\d+)\]\.(\w+)$")
+
     for update in request.field_updates:
-        # Supports top-level fields (e.g. "vendor") and dotted line-item
-        # paths as produced by low_confidence_fields(); simple top-level
-        # correction is applied directly, nested corrections are logged
-        # for the reviewer audit trail.
-        if "." not in update.field_path and update.field_path in record:
+        # Supports top-level fields (e.g. "vendor") and the
+        # "line_items[<idx>].<subfield>" paths produced by
+        # low_confidence_fields(): top-level corrections are applied
+        # directly; line-item corrections are parsed back into their index
+        # and written into the structured line_items array itself, not just
+        # logged to the audit trail below.
+        match = line_item_path_re.match(update.field_path)
+        if match:
+            idx, subfield = int(match.group(1)), match.group(2)
+            line_items = record.get("line_items") or []
+            if 0 <= idx < len(line_items) and subfield in line_items[idx]:
+                line_items[idx][subfield] = update.corrected_value
+        elif "." not in update.field_path and update.field_path in record:
             record[update.field_path] = update.corrected_value
         record.setdefault("_reviewer_corrections", []).append(
             {"field": update.field_path, "corrected_value": redact(update.corrected_value)}

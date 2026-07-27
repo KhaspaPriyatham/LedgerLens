@@ -57,7 +57,14 @@ class InvoiceSchema(BaseModel):
         return min(confidences) if confidences else self.overall_confidence
 
     def low_confidence_fields(self, threshold: float) -> list[dict]:
-        """Return a list of {field, confidence} dicts under the threshold."""
+        """Return a list of {field, confidence} dicts under the threshold.
+
+        Line-item fields use a machine-parseable "line_items[<idx>].description"
+        path -- rather than embedding the item's own (possibly low-confidence,
+        possibly punctuation-containing) description text -- so that /approve
+        can parse the index back out and write reviewer corrections into the
+        structured line_items array, not just an audit-trail log entry.
+        """
         flagged = []
         if self.overall_confidence < threshold:
             flagged.append({"field": "overall", "confidence": self.overall_confidence})
@@ -65,7 +72,7 @@ class InvoiceSchema(BaseModel):
             if li.confidence < threshold:
                 flagged.append(
                     {
-                        "field": f"line_items[{idx}].{li.description}",
+                        "field": f"line_items[{idx}].description",
                         "confidence": li.confidence,
                     }
                 )
