@@ -93,12 +93,18 @@ def fetch_documents(status: str | None = None, limit: int = 200):
 
 
 def fetch_review_queue():
+    """Returns (queue, ok). `ok` distinguishes "the queue is genuinely
+    empty" from "the fetch failed" -- the caller must not treat a failed
+    fetch as evidence that a document is gone."""
     try:
         resp = requests.get(f"{API_BASE}/review", timeout=30)
-        return resp.json() if resp.status_code == 200 else []
+        if resp.status_code == 200:
+            return resp.json(), True
+        st.error(f"Review queue fetch failed: {resp.status_code} — {resp.text}")
+        return [], False
     except requests.RequestException as exc:
         st.error(f"Could not reach API at {API_BASE}: {exc}")
-        return []
+        return [], False
 
 
 def fetch_document_image(document_id: str):
@@ -210,24 +216,52 @@ st.markdown(
 # color, which is red, not something set intentionally.
 #
 # st.radio has neither problem: its selected value is a plain widget value
-# tied to a stable `key`, which Streamlit reliably preserves across every
-# rerun (including the st.rerun() calls after Approve/Reject/Refresh) with
-# no manual rerun call needed for navigation at all, and no red styling.
-nav_choice = st.radio(
+# tied to a stable `key`, and no red styling.
+#
+# However, a widget key alone is NOT a durable place to keep the active
+# tab. Streamlit only keeps widget-keyed state alive while that widget
+# keeps being rendered, and the value the frontend reports back after an
+# st.rerun() is what wins -- so a rerun fired from inside the Review Queue
+# (Approve / Reject / Refresh queue) could snap the radio back to its first
+# option and bounce the reviewer to the Upload tab.
+#
+# The fix is to keep the real answer in `active_tab`, an ordinary
+# session_state key that is NOT owned by any widget and therefore survives
+# every rerun untouched, and to treat the radio purely as an input device:
+# clicks write into `active_tab` via on_change, and every run re-asserts the
+# radio's value from `active_tab` before the widget is created. That
+# assignment is a no-op on the run where the user actually clicked (the
+# callback has already updated `active_tab` by then), so genuine navigation
+# still works normally.
+TAB_LABELS = {
+    "Upload": "📤 Upload",
+    "Review Queue": "🕵️ Review Queue",
+    "Accepted": "✅ Accepted",
+    "Rejected": "❌ Rejected",
+}
+LABEL_TO_TAB = {label: tab for tab, label in TAB_LABELS.items()}
+
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "Upload"
+
+
+def _on_nav_change():
+    st.session_state.active_tab = LABEL_TO_TAB[st.session_state.active_tab_radio]
+
+
+# Re-assert the widget's value from the durable key. Must happen before the
+# widget is instantiated -- assigning to a widget key afterwards is an error.
+st.session_state.active_tab_radio = TAB_LABELS[st.session_state.active_tab]
+
+st.radio(
     "Navigate",
-    options=["📤 Upload", "🕵️ Review Queue", "✅ Accepted", "❌ Rejected"],
+    options=list(TAB_LABELS.values()),
     horizontal=True,
     label_visibility="collapsed",
     key="active_tab_radio",
+    on_change=_on_nav_change,
 )
-if nav_choice.startswith("📤"):
-    active_tab = "Upload"
-elif nav_choice.startswith("🕵️"):
-    active_tab = "Review Queue"
-elif nav_choice.startswith("✅"):
-    active_tab = "Accepted"
-else:
-    active_tab = "Rejected"
+active_tab = st.session_state.active_tab
 
 st.divider()
 
@@ -368,10 +402,34 @@ if active_tab == "Upload":
 
 elif active_tab == "Review Queue":
     st.subheader("Documents pending review")
+
+    # Documents this session has already approved/rejected. The API is the
+    # source of truth, but a card must disappear the instant its action
+    # succeeds -- so resolved ids are hidden locally rather than depending
+    # on the very next /review fetch already reflecting the write.
+    if "resolved_docs" not in st.session_state:
+        st.session_state.resolved_docs = set()
+
+    # Anything reported by a completed action is shown once, after the
+    # rerun. st.success() immediately followed by st.rerun() never paints,
+    # because the rerun discards the page it was written to.
+    if st.session_state.get("review_flash"):
+        st.success(st.session_state.review_flash)
+        st.session_state.review_flash = None
+
     if st.button("Refresh queue"):
+        st.session_state.active_tab = "Review Queue"
         st.rerun()
 
-    queue = fetch_review_queue()
+    queue, fetch_ok = fetch_review_queue()
+
+    if fetch_ok:
+        # Once the API stops returning a document, the local hide is
+        # redundant -- drop it so the set can't grow without bound and
+        # can't suppress a document that legitimately returns to the queue.
+        returned_ids = {doc["document_id"] for doc in queue}
+        st.session_state.resolved_docs &= returned_ids
+        queue = [doc for doc in queue if doc["document_id"] not in st.session_state.resolved_docs]
 
     if not queue:
         st.info("No documents currently pending review. 🎉")
@@ -462,7 +520,11 @@ elif active_tab == "Review Queue":
                         if approve_resp is None:
                             pass
                         elif approve_resp.status_code == 200:
-                            st.success("Approved! Moved to the Accepted tab.")
+                            st.session_state.resolved_docs.add(doc["document_id"])
+                            st.session_state.review_flash = (
+                                f"✅ Approved {doc['document_id']} — moved to the Accepted tab."
+                            )
+                            st.session_state.active_tab = "Review Queue"
                             st.rerun()
                         else:
                             st.error(f"Approval failed: {approve_resp.text}")
@@ -482,7 +544,11 @@ elif active_tab == "Review Queue":
                         if reject_resp is None:
                             pass
                         elif reject_resp.status_code == 200:
-                            st.success("Rejected — moved to the Rejected tab.")
+                            st.session_state.resolved_docs.add(doc["document_id"])
+                            st.session_state.review_flash = (
+                                f"❌ Rejected {doc['document_id']} — moved to the Rejected tab."
+                            )
+                            st.session_state.active_tab = "Review Queue"
                             st.rerun()
                         else:
                             st.error(f"Rejection failed: {reject_resp.text}")
