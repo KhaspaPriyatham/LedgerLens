@@ -11,7 +11,31 @@ API_BASE = os.getenv("LEDGERLENS_API", "http://localhost:8000")
 
 st.set_page_config(page_title="LedgerLens", layout="wide")
 st.title("📄 LedgerLens — Document Intelligence")
-st.caption("Build marker: 2026-07-28-v12 (approve/reject/refresh fix, no reruns)")
+st.caption("Build marker: 2026-07-28-v13 (review queue images over HTTP)")
+
+
+def fetch_document_image(document_id: str):
+    """Fetch a document's watermarked image from the API. Returns
+    (image_bytes, error_message); exactly one of the two is set.
+
+    This goes over HTTP via GET /documents/{id}/image rather than opening
+    the `image_path` recorded in the database. That path is only meaningful
+    inside the API's own filesystem: the Streamlit process and the API
+    process are separate containers under docker-compose, and separate
+    services entirely once deployed, so reading the path directly only ever
+    worked by the accident of a shared mount -- and silently showed
+    "Source image file not found" the moment that mount wasn't there.
+    """
+    try:
+        resp = requests.get(f"{API_BASE}/documents/{document_id}/image", timeout=15)
+    except requests.RequestException as exc:
+        return None, f"could not reach the API at {API_BASE} ({type(exc).__name__})"
+
+    if resp.status_code == 200:
+        return (resp.content, None) if resp.content else (None, "the API returned an empty image")
+    if resp.status_code == 404:
+        return None, "no image stored for this document"
+    return None, f"the API returned HTTP {resp.status_code}"
 
 # --- Navigation -------------------------------------------------------------
 # Using st.radio for navigation, not st.tabs() or manually-styled buttons.
@@ -251,35 +275,22 @@ else:  # Review Queue
             col1, col2 = st.columns([1, 2])
 
             with col1:
-                st.caption("🔧 image-loader-v2")
-                image_path = doc.get("image_path")
-                if not image_path:
-                    st.warning("No source image path recorded for this document.")
-                elif not os.path.exists(image_path):
-                    st.warning(f"Source image file not found at: {image_path}")
-                else:
-                    img_bytes = None
+                img_bytes, img_error = fetch_document_image(doc["document_id"])
+                if img_bytes:
                     try:
-                        with open(image_path, "rb") as f:
-                            img_bytes = f.read()
-                        if not img_bytes:
-                            raise ValueError("file is empty (0 bytes)")
                         # Force a full decode here (not just PIL.Image.open,
-                        # which is lazy) so a truncated/corrupted file raises
+                        # which is lazy) so a truncated/corrupted image raises
                         # a clear Python exception now, rather than silently
                         # becoming the browser's generic broken-image icon
                         # with zero diagnostic information.
                         decoded = Image.open(io.BytesIO(img_bytes))
                         decoded.load()
-                        st.caption(
-                            f"Decoded OK: {decoded.format}, {decoded.size[0]}x{decoded.size[1]}, "
-                            f"{len(img_bytes)} bytes on disk"
-                        )
                         st.image(img_bytes, caption="Watermarked source", width=300)
                     except Exception as exc:
-                        size = len(img_bytes) if img_bytes is not None else 0
-                        st.error(f"Could not load source image: {type(exc).__name__}: {exc}")
-                        st.caption(f"Path checked: {image_path} ({size} bytes read)")
+                        st.error(f"Could not decode source image: {type(exc).__name__}: {exc}")
+                        st.caption(f"{len(img_bytes)} bytes received from the API.")
+                else:
+                    st.warning(f"Source image not available: {img_error}")
 
                 st.caption(f"**Uploaded:** {doc.get('created_at') or 'unknown'}")
                 st.caption(f"**Moderation verdict:** {doc.get('moderation_verdict') or 'n/a'}")
