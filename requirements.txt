@@ -9,5 +9,11 @@ python-multipart==0.0.9
 streamlit==1.38.0
 requests==2.32.3
 pandas==2.2.2
+# Pinned deliberately. pyarrow arrives transitively via streamlit, and 25.0.0
+# segfaults converting a DataFrame to Arrow for st.data_editor against
+# pandas 2.2.2 (pyarrow/pandas_compat.py convert_column) -- which the Review
+# Queue hits on every render. Leaving it unpinned is what broke CI. Anything
+# <= 24.0.0 is fine; re-test before raising this.
+pyarrow==24.0.0
 pytest==8.3.3
 httpx==0.27.2
