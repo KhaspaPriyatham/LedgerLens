@@ -1,202 +1,17 @@
+import io
 import json
 import os
 
 import pandas as pd
 import requests
 import streamlit as st
+from PIL import Image
 
 API_BASE = os.getenv("LEDGERLENS_API", "http://localhost:8000")
-# Separate, browser-facing convenience links for the sidebar. API_BASE is
-# often an internal address this process uses to reach the API (e.g. the
-# Docker network name "http://api:8080"), which isn't reachable from the
-# user's own browser -- these default to the host ports docker-compose.yml
-# actually exposes, matching what `scripts/print_links.sh` prints.
-API_DOCS_URL = os.getenv("LEDGERLENS_API_PUBLIC_URL", "http://localhost:8090")
-GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3001")
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9091")
 
-st.set_page_config(page_title="LedgerLens", page_icon="📄", layout="wide")
-
-STATUS_COLORS = {
-    "auto_approved": "#2ecc71",
-    "approved": "#2ecc71",
-    "pending_review": "#f1c40f",
-    "blocked": "#e74c3c",
-    "rejected": "#e74c3c",
-    "processing": "#95a5a6",
-}
-STATUS_LABELS = {
-    "auto_approved": "auto-approved",
-    "approved": "approved",
-    "pending_review": "pending review",
-    "blocked": "blocked",
-    "rejected": "rejected",
-    "processing": "processing",
-}
-
-st.markdown(
-    """
-    <style>
-    .ll-badge {
-        display: inline-block;
-        padding: 2px 12px;
-        border-radius: 999px;
-        font-size: 0.82em;
-        font-weight: 600;
-        color: #111111;
-        white-space: nowrap;
-    }
-    .ll-subtitle {
-        opacity: 0.7;
-        font-size: 0.95em;
-        margin-top: -0.6rem;
-        margin-bottom: 1rem;
-    }
-    .ll-health-dot {
-        height: 10px;
-        width: 10px;
-        border-radius: 50%;
-        display: inline-block;
-        margin-right: 6px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-def status_badge(status: str) -> str:
-    color = STATUS_COLORS.get(status, "#95a5a6")
-    label = STATUS_LABELS.get(status, status)
-    return f'<span class="ll-badge" style="background:{color};">{label}</span>'
-
-
-def fetch_health() -> bool:
-    try:
-        resp = requests.get(f"{API_BASE}/health", timeout=5)
-        return resp.status_code == 200
-    except requests.RequestException:
-        return False
-
-
-def fetch_documents(status: str | None = None, limit: int = 200):
-    """GET /documents, optionally filtered by status. Backs the KPI row and
-    the Accepted / Rejected views."""
-    try:
-        params = {"limit": limit}
-        if status:
-            params["status"] = status
-        resp = requests.get(f"{API_BASE}/documents", params=params, timeout=30)
-        return resp.json() if resp.status_code == 200 else []
-    except requests.RequestException:
-        return []
-
-
-def fetch_review_queue():
-    """Returns (queue, ok). `ok` distinguishes "the queue is genuinely
-    empty" from "the fetch failed" -- the caller must not treat a failed
-    fetch as evidence that a document is gone."""
-    try:
-        resp = requests.get(f"{API_BASE}/review", timeout=30)
-        if resp.status_code == 200:
-            return resp.json(), True
-        st.error(f"Review queue fetch failed: {resp.status_code} — {resp.text}")
-        return [], False
-    except requests.RequestException as exc:
-        st.error(f"Could not reach API at {API_BASE}: {exc}")
-        return [], False
-
-
-def fetch_document_image(document_id: str):
-    """Fetch the watermarked source image over HTTP via GET
-    /documents/{id}/image, rather than reading a local filesystem path.
-    This is what actually makes images render in the Review Queue /
-    Accepted / Rejected views: the Streamlit process and the API process
-    do not reliably share a filesystem (they don't at all once deployed as
-    separate Cloud Run services), so a shared-disk read is fundamentally
-    the wrong approach here, not just a path bug."""
-    try:
-        resp = requests.get(f"{API_BASE}/documents/{document_id}/image", timeout=15)
-        return resp.content if resp.status_code == 200 else None
-    except requests.RequestException:
-        return None
-
-
-def fetch_total_cost():
-    try:
-        resp = requests.get(f"{API_BASE}/metrics", timeout=10)
-        if resp.status_code == 200:
-            for line in resp.text.splitlines():
-                parts = line.split()
-                if len(parts) == 2 and parts[0] == "token_cost_usd_total":
-                    return float(parts[1])
-    except (requests.RequestException, ValueError):
-        pass
-    return None
-
-
-def render_document_list(docs):
-    """Shared card renderer for the Accepted / Rejected views."""
-    if not docs:
-        st.info("Nothing here yet.")
-        return
-    for doc in docs:
-        with st.container(border=True):
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                img_bytes = fetch_document_image(doc["document_id"])
-                if img_bytes:
-                    st.image(img_bytes, width=220)
-                else:
-                    st.caption("No image available.")
-            with col2:
-                st.markdown(
-                    f"**{doc['vendor'] or 'Unrecognized document'}** "
-                    + status_badge(doc["status"]),
-                    unsafe_allow_html=True,
-                )
-                st.caption(f"Document ID: {doc['document_id']}")
-                st.write(f"Total: {doc['total']} {doc['currency'] or ''}".strip())
-                st.caption(f"Processed: {doc.get('created_at') or 'unknown'}")
-                if doc.get("extracted_json"):
-                    with st.expander("Extracted data"):
-                        try:
-                            st.json(json.loads(doc["extracted_json"]))
-                        except (TypeError, ValueError):
-                            st.text(doc["extracted_json"])
-                if doc.get("reviewed_json"):
-                    with st.expander("Reviewer corrections"):
-                        try:
-                            st.json(json.loads(doc["reviewed_json"]))
-                        except (TypeError, ValueError):
-                            st.text(doc["reviewed_json"])
-
-
-# --- Sidebar ------------------------------------------------------------
-with st.sidebar:
-    st.header("📄 LedgerLens")
-    healthy = fetch_health()
-    dot_color = "#2ecc71" if healthy else "#e74c3c"
-    st.markdown(
-        f'<span class="ll-health-dot" style="background:{dot_color};"></span>'
-        f'API: {"healthy" if healthy else "unreachable"}',
-        unsafe_allow_html=True,
-    )
-    st.caption(f"Connected to: {API_BASE}")
-    st.divider()
-    st.markdown("**Quick links**")
-    st.markdown(f"- [API docs (Swagger)]({API_DOCS_URL}/docs)")
-    st.markdown(f"- [Grafana dashboard]({GRAFANA_URL})")
-    st.markdown(f"- [Prometheus targets]({PROMETHEUS_URL}/targets)")
-
-# --- Header ---------------------------------------------------------------
+st.set_page_config(page_title="LedgerLens", layout="wide")
 st.title("📄 LedgerLens — Document Intelligence")
-st.markdown(
-    '<div class="ll-subtitle">Drop in a receipt or invoice — schema-validated '
-    "extraction, per-field confidence, and a human review queue for anything "
-    "the model isn't sure about.</div>",
-    unsafe_allow_html=True,
-)
+st.caption("Build marker: 2026-07-28-v11 (approve/reject/refresh fix)")
 
 # --- Navigation -------------------------------------------------------------
 # Using st.radio for navigation, not st.tabs() or manually-styled buttons.
@@ -233,12 +48,7 @@ st.markdown(
 # assignment is a no-op on the run where the user actually clicked (the
 # callback has already updated `active_tab` by then), so genuine navigation
 # still works normally.
-TAB_LABELS = {
-    "Upload": "📤 Upload",
-    "Review Queue": "🕵️ Review Queue",
-    "Accepted": "✅ Accepted",
-    "Rejected": "❌ Rejected",
-}
+TAB_LABELS = {"Upload": "📤 Upload", "Review Queue": "🕵️ Review Queue"}
 LABEL_TO_TAB = {label: tab for tab, label in TAB_LABELS.items()}
 
 if "active_tab" not in st.session_state:
@@ -265,25 +75,6 @@ active_tab = st.session_state.active_tab
 
 st.divider()
 
-# --- KPI row (every tab) ----------------------------------------------------
-all_docs = fetch_documents(limit=1000)
-status_counts: dict[str, int] = {}
-for _d in all_docs:
-    status_counts[_d["status"]] = status_counts.get(_d["status"], 0) + 1
-total_cost = fetch_total_cost()
-
-kpi_cols = st.columns(6)
-kpi_cols[0].metric("Total documents", len(all_docs))
-kpi_cols[1].metric("Pending review", status_counts.get("pending_review", 0))
-kpi_cols[2].metric("Auto-approved", status_counts.get("auto_approved", 0))
-kpi_cols[3].metric("Approved", status_counts.get("approved", 0))
-kpi_cols[4].metric("Rejected", status_counts.get("rejected", 0))
-kpi_cols[5].metric(
-    "Extraction cost", f"${total_cost:.4f}" if total_cost is not None else "n/a"
-)
-
-st.divider()
-
 # The file_uploader widget is keyed off this counter. Bumping the counter
 # forces Streamlit to instantiate a brand new widget instance (fresh
 # internal state) rather than reusing the previous one -- this is what
@@ -298,37 +89,17 @@ if "uploader_generation" not in st.session_state:
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None
 
-# Preview image bytes, stored separately from the live file_uploader value.
-# This -- not `uploaded` -- is the single source of truth for the preview:
-# Streamlit deletes a widget's stored value whenever that widget isn't
-# instantiated during a given rerun, and since Upload/Review Queue/Accepted/
-# Rejected are mutually-exclusive branches below, the file_uploader simply
-# doesn't exist on any rerun where the user isn't on the Upload tab. Relying
-# on the live `uploaded` value as the primary preview source meant the
-# preview could vanish just from navigating to another tab and back, on top
-# of being explicitly cleared by error branches (both bugs are fixed here:
-# see the ingest response handling below, which no longer clears this on
-# error, and the fact that this is now populated as soon as a file is
-# chosen, independent of what the API responds).
+# Preview image bytes, stored separately from the live file_uploader value,
+# so the preview survives reruns without depending on widget re-serialization.
 if "last_extraction_image" not in st.session_state:
     st.session_state.last_extraction_image = None
-
-# Persisted error/blocked message, shown until Clear is clicked -- same
-# rationale as last_extraction_image: previously the error text only lived
-# inside the button-click branch and disappeared on the next unrelated
-# rerun (e.g. switching tabs), which read as "the result silently vanished".
-if "last_error" not in st.session_state:
-    st.session_state.last_error = None
 
 if active_tab == "Upload":
     st.subheader("Upload a receipt or invoice")
     uploader_key = f"file_uploader_{st.session_state.uploader_generation}"
     uploaded = st.file_uploader("Image file (JPG/PNG)", type=["jpg", "jpeg", "png"], key=uploader_key)
 
-    if uploaded is not None:
-        st.session_state.last_extraction_image = uploaded.getvalue()
-    preview_bytes = st.session_state.last_extraction_image
-
+    preview_bytes = uploaded.getvalue() if uploaded is not None else st.session_state.last_extraction_image
     if preview_bytes is not None:
         st.image(preview_bytes, caption="Preview", width=350)
 
@@ -340,7 +111,6 @@ if active_tab == "Upload":
             st.session_state.uploader_generation += 1
             st.session_state.last_extraction = None
             st.session_state.last_extraction_image = None
-            st.session_state.last_error = None
             st.rerun()
 
     if uploaded is not None and extract_clicked:
@@ -349,39 +119,34 @@ if active_tab == "Upload":
             try:
                 resp = requests.post(f"{API_BASE}/ingest", files=files, timeout=60)
             except requests.RequestException as exc:
-                st.session_state.last_error = f"Could not reach API at {API_BASE}: {exc}"
-                st.session_state.last_extraction = None
+                st.error(f"Could not reach API at {API_BASE}: {exc}")
                 resp = None
 
         if resp is not None:
             if resp.status_code == 422:
                 detail = resp.json().get("detail", {})
-                st.session_state.last_error = f"🚫 Blocked by moderation: {detail.get('blocked_reason')}"
+                st.error(f"🚫 Blocked by moderation: {detail.get('blocked_reason')}")
                 st.session_state.last_extraction = None
-                # last_extraction_image is intentionally left untouched here.
-                # A blocked/error result must not clear the preview -- it
-                # should stay on screen until the user explicitly clicks
-                # "Clear / upload a different file".
+                st.session_state.last_extraction_image = None
             elif resp.status_code == 200:
                 st.session_state.last_extraction = resp.json()
-                st.session_state.last_error = None
+                st.session_state.last_extraction_image = uploaded.getvalue()
             else:
-                st.session_state.last_error = f"Unexpected error: {resp.status_code} — {resp.text}"
+                st.error(f"Unexpected error: {resp.status_code} — {resp.text}")
                 st.session_state.last_extraction = None
-
-    if st.session_state.last_error:
-        st.error(st.session_state.last_error)
+                st.session_state.last_extraction_image = None
 
     data = st.session_state.last_extraction
     if data is not None:
         st.divider()
         status = data["status"]
-        st.markdown(
-            f"**Document {data['document_id']}** " + status_badge(status),
-            unsafe_allow_html=True,
-        )
-        if status == "pending_review":
-            st.caption("Sent to the Review Queue tab for a human decision.")
+        if status == "auto_approved":
+            badge = "✅ auto-approved"
+        elif status == "pending_review":
+            badge = "🕵️ pending review — sent to Review Queue tab"
+        else:
+            badge = status
+        st.success(f"Document {data['document_id']} — {badge}")
 
         extracted = data["extracted"]
         st.json(extracted)
@@ -400,7 +165,7 @@ if active_tab == "Upload":
         st.caption(f"Extraction cost: ${data['cost_usd']:.4f}")
         st.caption("This report stays here until you click \"Clear / upload a different file\" above.")
 
-elif active_tab == "Review Queue":
+else:  # Review Queue
     st.subheader("Documents pending review")
 
     # Documents this session has already approved/rejected. The API is the
@@ -421,7 +186,17 @@ elif active_tab == "Review Queue":
         st.session_state.active_tab = "Review Queue"
         st.rerun()
 
-    queue, fetch_ok = fetch_review_queue()
+    fetch_ok = True
+    try:
+        queue_resp = requests.get(f"{API_BASE}/review", timeout=30)
+        if queue_resp.status_code == 200:
+            queue = queue_resp.json()
+        else:
+            st.error(f"Review queue fetch failed: {queue_resp.status_code} — {queue_resp.text}")
+            queue, fetch_ok = [], False
+    except requests.RequestException as exc:
+        st.error(f"Could not reach API at {API_BASE}: {exc}")
+        queue, fetch_ok = [], False
 
     if fetch_ok:
         # Once the API stops returning a document, the local hide is
@@ -435,22 +210,40 @@ elif active_tab == "Review Queue":
         st.info("No documents currently pending review. 🎉")
 
     for doc in queue:
-        with st.container(border=True):
-            title_vendor = doc["vendor"] or "Unrecognized document"
-            header_col, badge_col = st.columns([4, 1])
-            header_col.markdown(f"#### {title_vendor}")
-            with badge_col:
-                st.markdown(status_badge("pending_review"), unsafe_allow_html=True)
-            st.caption(f"Document ID: {doc['document_id']}")
-
+        title_vendor = doc["vendor"] or "Unrecognized document"
+        with st.expander(f"{title_vendor} — {doc['document_id']}"):
             col1, col2 = st.columns([1, 2])
 
             with col1:
-                img_bytes = fetch_document_image(doc["document_id"])
-                if img_bytes:
-                    st.image(img_bytes, caption="Watermarked source", width=300)
+                st.caption("🔧 image-loader-v2")
+                image_path = doc.get("image_path")
+                if not image_path:
+                    st.warning("No source image path recorded for this document.")
+                elif not os.path.exists(image_path):
+                    st.warning(f"Source image file not found at: {image_path}")
                 else:
-                    st.warning("Source image not available from the API.")
+                    img_bytes = None
+                    try:
+                        with open(image_path, "rb") as f:
+                            img_bytes = f.read()
+                        if not img_bytes:
+                            raise ValueError("file is empty (0 bytes)")
+                        # Force a full decode here (not just PIL.Image.open,
+                        # which is lazy) so a truncated/corrupted file raises
+                        # a clear Python exception now, rather than silently
+                        # becoming the browser's generic broken-image icon
+                        # with zero diagnostic information.
+                        decoded = Image.open(io.BytesIO(img_bytes))
+                        decoded.load()
+                        st.caption(
+                            f"Decoded OK: {decoded.format}, {decoded.size[0]}x{decoded.size[1]}, "
+                            f"{len(img_bytes)} bytes on disk"
+                        )
+                        st.image(img_bytes, caption="Watermarked source", width=300)
+                    except Exception as exc:
+                        size = len(img_bytes) if img_bytes is not None else 0
+                        st.error(f"Could not load source image: {type(exc).__name__}: {exc}")
+                        st.caption(f"Path checked: {image_path} ({size} bytes read)")
 
                 st.caption(f"**Uploaded:** {doc.get('created_at') or 'unknown'}")
                 st.caption(f"**Moderation verdict:** {doc.get('moderation_verdict') or 'n/a'}")
@@ -522,7 +315,7 @@ elif active_tab == "Review Queue":
                         elif approve_resp.status_code == 200:
                             st.session_state.resolved_docs.add(doc["document_id"])
                             st.session_state.review_flash = (
-                                f"✅ Approved {doc['document_id']} — moved to the Accepted tab."
+                                f"✅ Approved {doc['document_id']} — removed from the review queue."
                             )
                             st.session_state.active_tab = "Review Queue"
                             st.rerun()
@@ -546,19 +339,9 @@ elif active_tab == "Review Queue":
                         elif reject_resp.status_code == 200:
                             st.session_state.resolved_docs.add(doc["document_id"])
                             st.session_state.review_flash = (
-                                f"❌ Rejected {doc['document_id']} — moved to the Rejected tab."
+                                f"❌ Rejected {doc['document_id']} — removed from the review queue."
                             )
                             st.session_state.active_tab = "Review Queue"
                             st.rerun()
                         else:
                             st.error(f"Rejection failed: {reject_resp.text}")
-
-elif active_tab == "Accepted":
-    st.subheader("Accepted documents")
-    st.caption("Approved from the Review Queue, or auto-approved on ingest.")
-    render_document_list(fetch_documents(status="approved") + fetch_documents(status="auto_approved"))
-
-else:  # Rejected
-    st.subheader("Rejected documents")
-    st.caption("Rejected from the Review Queue.")
-    render_document_list(fetch_documents(status="rejected"))

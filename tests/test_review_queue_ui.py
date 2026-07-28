@@ -58,17 +58,8 @@ class FakeAPI:
         self.posts = []
 
     def get(self, url, **kwargs):
-        if url.endswith("/review"):
-            return _Resp([_doc(d) for d in self.pending])
-        if url.endswith("/image"):
-            return _Resp(None, status_code=404)
-        if url.endswith("/metrics"):
-            return _Resp("token_cost_usd_total 0.0")
-        if url.endswith("/documents"):  # KPI row
-            return _Resp([])
-        if url.endswith("/health"):
-            return _Resp({"status": "ok"})
-        raise AssertionError(f"unexpected GET {url}")
+        assert url.endswith("/review"), f"unexpected GET {url}"
+        return _Resp([_doc(d) for d in self.pending])
 
     def post(self, url, json=None, **kwargs):
         self.posts.append((url.rsplit("/", 1)[-1], json["document_id"]))
@@ -94,12 +85,8 @@ def _open_review_tab(at):
 
 
 def _rendered_doc_ids(at):
-    """Each queue card renders `st.caption("Document ID: <id>")`."""
-    return [
-        c.value.split("Document ID:", 1)[1].strip()
-        for c in at.caption
-        if "Document ID:" in c.value
-    ]
+    """Each queue card is an expander labelled "<vendor> — <id>"."""
+    return [e.label.split("—")[-1].strip() for e in at.expander]
 
 
 # --- Bug 2: navigation must survive every rerun ------------------------------

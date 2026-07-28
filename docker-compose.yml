@@ -32,12 +32,6 @@ services:
       - "8511:8501"
     environment:
       - LEDGERLENS_API=http://api:8080
-      # Browser-facing convenience links shown in the Streamlit sidebar;
-      # these default to the host ports below already, so they're only
-      # listed here for discoverability -- override if you remap ports.
-      - LEDGERLENS_API_PUBLIC_URL=http://localhost:8090
-      - GRAFANA_URL=http://localhost:3001
-      - PROMETHEUS_URL=http://localhost:9091
     restart: unless-stopped
     depends_on:
       api:
