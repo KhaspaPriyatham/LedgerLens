@@ -30,7 +30,10 @@ def _doc(doc_id):
         "moderation_verdict": "allow",
         "created_at": "2026-07-28T00:00:00",
         "extracted_json": '{"vendor": "Unrecognized document", "line_items": [], "overall_confidence": 0.0}',
-        "image_path": None,  # skips the image loader entirely
+        # Deliberately a path that exists nowhere. The UI must not read it:
+        # images come from the API over HTTP, because the Streamlit and API
+        # processes don't share a filesystem.
+        "image_path": "/nonexistent/api-side/path/watermarked.png",
         "flagged_fields": [
             {"field_path": "vendor", "confidence": 0.0},
             {"field_path": "total", "confidence": 0.1},
@@ -38,11 +41,23 @@ def _doc(doc_id):
     }
 
 
+def _png_bytes(color=(200, 40, 40)):
+    """A real, decodable 40x30 PNG -- the UI fully decodes what it renders."""
+    import io as _io
+
+    from PIL import Image as _Image
+
+    buf = _io.BytesIO()
+    _Image.new("RGB", (40, 30), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class _Resp:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, content=b""):
         self._payload = payload
         self.status_code = status_code
         self.text = payload if isinstance(payload, str) else str(payload)
+        self.content = content
 
     def json(self):
         return self._payload
@@ -56,14 +71,24 @@ class FakeAPI:
     linger on screen.
     """
 
-    def __init__(self, doc_ids, stale=False):
+    def __init__(self, doc_ids, stale=False, image_status=200, image_bytes=None):
         self.pending = list(doc_ids)
         self.stale = stale
+        self.image_status = image_status
+        self.image_bytes = _png_bytes() if image_bytes is None else image_bytes
         self.posts = []
+        self.image_requests = []
 
     def get(self, url, **kwargs):
-        assert url.endswith("/review"), f"unexpected GET {url}"
-        return _Resp([_doc(d) for d in self.pending])
+        if url.endswith("/review"):
+            return _Resp([_doc(d) for d in self.pending])
+        if url.endswith("/image"):
+            # .../documents/<id>/image
+            self.image_requests.append(url.rsplit("/", 2)[-2])
+            if self.image_status != 200:
+                return _Resp("no image", status_code=self.image_status)
+            return _Resp(None, content=self.image_bytes)
+        raise AssertionError(f"unexpected GET {url}")
 
     def post(self, url, json=None, **kwargs):
         action = url.rsplit("/", 1)[-1]
@@ -75,8 +100,8 @@ class FakeAPI:
 
 @pytest.fixture
 def api(monkeypatch):
-    def _install(doc_ids, stale=False):
-        fake = FakeAPI(doc_ids, stale=stale)
+    def _install(doc_ids, **kwargs):
+        fake = FakeAPI(doc_ids, **kwargs)
         monkeypatch.setattr("requests.get", fake.get)
         monkeypatch.setattr("requests.post", fake.post)
         return fake
@@ -315,3 +340,98 @@ def test_reject_does_not_send_field_updates(api):
     action, payload = fake.posts[0]
     assert action == "reject"
     assert "field_updates" not in payload
+
+
+# --- Review Queue images ------------------------------------------------------
+
+
+def test_image_is_fetched_from_the_api_not_from_disk(api):
+    """The regression: the UI opened doc["image_path"] directly. That path
+    belongs to the API's filesystem, so under docker-compose (separate
+    containers) it doesn't exist and the image silently never rendered."""
+    fake = api(["aaa"])
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert fake.image_requests == ["aaa"], "did not request the image over HTTP"
+    assert len(at.get('imgs')) == 1, "watermarked source image did not render"
+    assert not at.warning and not at.error
+
+
+def test_image_renders_even_though_image_path_is_unreachable(api):
+    """_doc() reports an image_path that exists nowhere. Rendering must
+    still succeed, proving the UI no longer touches the filesystem."""
+    import os
+
+    fake = api(["aaa"])
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert not os.path.exists(_doc("aaa")["image_path"])
+    assert len(at.get('imgs')) == 1
+    assert fake.image_requests == ["aaa"]
+
+
+def test_one_image_request_per_queued_document(api):
+    fake = api(["aaa", "bbb", "ccc"])
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert fake.image_requests == ["aaa", "bbb", "ccc"]
+    assert len(at.get('imgs')) == 3
+
+
+def test_missing_image_is_reported_without_breaking_the_card(api):
+    api(["aaa"], image_status=404)
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert not at.exception
+    assert any("no image stored" in w.value for w in at.warning)
+    # The rest of the card must still be usable.
+    assert _rendered_doc_ids(at) == ["aaa"]
+    assert [b for b in at.button if b.key == "approve_aaa"]
+
+
+def test_api_error_on_image_is_reported(api):
+    api(["aaa"], image_status=500)
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert not at.exception
+    assert any("HTTP 500" in w.value for w in at.warning)
+
+
+def test_empty_image_response_is_reported(api):
+    api(["aaa"], image_bytes=b"")
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert not at.exception
+    assert any("empty image" in w.value for w in at.warning)
+    assert not at.get('imgs')
+
+
+def test_corrupt_image_bytes_are_reported_not_silently_broken(api):
+    """A truncated/garbage body must produce a readable message rather than
+    the browser's blank broken-image icon."""
+    api(["aaa"], image_bytes=b"this is not a png")
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert not at.exception
+    assert any("Could not decode source image" in e.value for e in at.error)
+    assert not at.get('imgs')
+
+
+def test_unreachable_api_on_image_is_reported(api, monkeypatch):
+    import requests as _requests
+
+    fake = FakeAPI(["aaa"])
+    real_get = fake.get
+
+    def _get(url, **kwargs):
+        if url.endswith("/image"):
+            raise _requests.RequestException("connection refused")
+        return real_get(url, **kwargs)
+
+    monkeypatch.setattr("requests.get", _get)
+    monkeypatch.setattr("requests.post", fake.post)
+    at = _open_review_tab(AppTest.from_file(APP, default_timeout=30).run())
+
+    assert not at.exception
+    assert any("could not reach the API" in w.value for w in at.warning)
+    assert _rendered_doc_ids(at) == ["aaa"]
