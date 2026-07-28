@@ -43,7 +43,13 @@ Streamlit UI ──> FastAPI /ingest
 
 Reviewer flow: Streamlit Review Queue → GET /review → correct flagged
 fields in st.data_editor → POST /approve (or POST /reject) → document
-leaves the queue → outcome counted in Grafana ("Human Review Decisions")
+leaves the queue, lands in the Accepted or Rejected tab (GET /documents
+?status=...) → outcome counted in Grafana ("Human Review Decisions")
+
+Images (Upload preview, Review Queue / Accepted / Rejected thumbnails)
+are always loaded over HTTP via GET /documents/{id}/image -- the
+Streamlit process never reads the API's uploads/ directory off local
+disk, so this works whether or not the two processes share a filesystem.
 ```
 
 **Design principle carried through every layer:** a failure to extract
@@ -60,7 +66,8 @@ error states the operator has to reason about separately.
 ```
 app/
   main.py              FastAPI app: /ingest /review /approve /reject
-                        /documents/{id} /metrics /health
+                        /documents /documents/{id} /documents/{id}/image
+                        /metrics /health
   schemas.py           Pydantic contracts (InvoiceSchema, LineItem,
                         ApproveRequest, RejectRequest, ...)
   moderation.py        Image moderation gate (OpenAI Moderation API)
@@ -74,18 +81,24 @@ app/
   metrics.py           Prometheus Counter/Histogram/Gauge definitions
   config.py            Thresholds, model names, cost table
 
-streamlit_app/app.py   Upload + Review Queue UI (session-state-backed
-                        navigation, st.data_editor for corrections)
+streamlit_app/app.py   Upload / Review Queue / Accepted / Rejected UI
+                        (session-state-backed navigation, st.data_editor
+                        for corrections, images loaded over HTTP via
+                        /documents/{id}/image, KPI row, status badges)
+
+.streamlit/config.toml Dark theme applied to the Streamlit app
 
 grafana/
   dashboards/ledgerlens.json           Pre-built dashboard, 7 panels
   provisioning/datasources/            Auto-connects Prometheus
   provisioning/dashboards/             Auto-loads the dashboard above
 
-tests/                 28 pytest tests covering schema contracts,
+tests/                 34 pytest tests covering schema contracts,
                         moderation routing, confidence routing, PII
-                        redaction, extraction fallback paths, and the
-                        approve/reject endpoints end-to-end
+                        redaction, extraction fallback paths, the
+                        approve/reject endpoints end-to-end, the document
+                        image endpoint, the documents list endpoint, and
+                        line-item correction write-back
 
 scripts/print_links.sh Polls every service's health endpoint from the
                         host and prints clickable links once ready
@@ -198,12 +211,14 @@ and link banner.
 pytest tests/ -v
 ```
 
-28 tests: schema round-tripping and validation, moderation routing
+34 tests: schema round-tripping and validation, moderation routing
 (including the "blocked images never reach the vision model" contract),
 confidence-threshold routing, PII redaction, extraction fallback for
-both outright refusals and schema-validation failures, and full
-end-to-end approve/reject flows including the Prometheus counters they
-drive. This is the exact suite the CI pipeline runs before every build.
+both outright refusals and schema-validation failures, full end-to-end
+approve/reject flows including the Prometheus counters they drive, the
+document image endpoint, the documents list endpoint (used by the
+Accepted/Rejected views), and line-item correction write-back. This is
+the exact suite the CI pipeline runs before every build.
 
 ---
 
@@ -215,7 +230,9 @@ drive. This is the exact suite the CI pipeline runs before every build.
 | `/review` | GET | List documents pending human review, with flagged fields |
 | `/approve` | POST | Apply reviewer corrections, mark document approved |
 | `/reject` | POST | Reject a queued document, removes it from the queue |
+| `/documents` | GET | List documents, optionally filtered by `?status=` (backs the Accepted/Rejected UI views) |
 | `/documents/{id}` | GET | Fetch a single document record |
+| `/documents/{id}/image` | GET | Serve the watermarked source image over HTTP |
 | `/metrics` | GET | Prometheus scrape endpoint |
 | `/health` | GET | Liveness check |
 
@@ -228,7 +245,7 @@ Interactive docs at `/docs` (Swagger UI) once the API is running.
 CI is wired in `.github/workflows/deploy.yml`, with two jobs:
 
 1. **`test`** — installs dependencies and runs the full pytest suite
-   (28 tests) on every push and pull request against `main`.
+   (34 tests) on every push and pull request against `main`.
 2. **`build-and-verify-stack`** — runs only if `test` passes. Mirrors the
    "Run the full stack with Docker" workflow above (the CI equivalent of
    `make up`): builds every image with `docker compose up --build -d`,
@@ -246,3 +263,8 @@ build and start cleanly either way).
 
 See `BUILD_NOTE.md` for what shipped, key decisions, and known
 limitations.
+
+See `VALIDATION_PLAN.md` for a full gap analysis against the original
+brief plus root-cause analysis and a concrete fix plan for known issues
+(Review Queue image loading, approve/reject visibility, Upload-tab state
+handling, and a UI polish pass).

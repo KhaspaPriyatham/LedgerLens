@@ -68,4 +68,4 @@ def test_low_confidence_fields_flags_correct_entries():
     )
     flagged = invoice.low_confidence_fields(threshold=0.75)
     assert len(flagged) == 1
-    assert "A" in flagged[0]["field"]
+    assert flagged[0]["field"] == "line_items[0].description"

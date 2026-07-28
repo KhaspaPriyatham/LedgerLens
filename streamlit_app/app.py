@@ -11,7 +11,7 @@ API_BASE = os.getenv("LEDGERLENS_API", "http://localhost:8000")
 
 st.set_page_config(page_title="LedgerLens", layout="wide")
 st.title("📄 LedgerLens — Document Intelligence")
-st.caption("Build marker: 2026-07-27-v10 (image-validation + radio nav)")
+st.caption("Build marker: 2026-07-28-v12 (approve/reject/refresh fix, no reruns)")
 
 # --- Navigation -------------------------------------------------------------
 # Using st.radio for navigation, not st.tabs() or manually-styled buttons.
@@ -31,9 +31,23 @@ st.caption("Build marker: 2026-07-27-v10 (image-validation + radio nav)")
 # color, which is red, not something set intentionally.
 #
 # st.radio has neither problem: its selected value is a plain widget value
-# tied to a stable `key`, which Streamlit reliably preserves across every
-# rerun (including the st.rerun() calls after Approve/Reject/Refresh) with
-# no manual rerun call needed for navigation at all, and no red styling.
+# tied to a stable `key`, and no red styling.
+#
+# The radio is left exactly as it was -- plain `key`, no `index`, and
+# nothing ever assigned to `active_tab_radio`. Two things that were tried
+# here and did NOT work, so they don't get tried again:
+#
+#   - Assigning to the widget's key before each render, to force the tab
+#     back. That races Streamlit's own widget machinery and lost: clicking
+#     "Review Queue" landed back on Upload.
+#   - Dropping the key and driving the radio with `index` instead. `index`
+#     is part of a widget's identity, so changing it makes Streamlit treat
+#     it as a brand new widget and throw the user's click away -- clicking
+#     back to Upload from Review Queue silently did nothing.
+#
+# What actually keeps the tab put is further down: the Review Queue no
+# longer calls st.rerun() at all. st.rerun() was the only thing resetting
+# this radio, so the fix is to not need one. See the Review Queue section.
 nav_choice = st.radio(
     "Navigate",
     options=["📤 Upload", "🕵️ Review Queue"],
@@ -137,15 +151,96 @@ if active_tab == "Upload":
 
 else:  # Review Queue
     st.subheader("Documents pending review")
-    if st.button("Refresh queue"):
-        st.rerun()
 
+    # Documents this session has already approved/rejected. The callback
+    # below runs before the /review fetch, so the API response should
+    # already omit them -- this is a belt-and-braces hide in case a resolved
+    # document still comes back, so a card can never linger after its action
+    # succeeded.
+    if "resolved_docs" not in st.session_state:
+        st.session_state.resolved_docs = set()
+
+    def _corrections_for(document_id, flagged_fields):
+        """Read the reviewer's edits back out of the data_editor's state.
+
+        A keyed st.data_editor stores a diff, not a DataFrame:
+        {"edited_rows": {<row index>: {<column>: <new value>}}, ...}. Row
+        indices line up with the flagged_fields list the table was built
+        from, which is how each edit is mapped back to its field_path.
+        """
+        state = st.session_state.get(f"editor_{document_id}") or {}
+        edited_rows = state.get("edited_rows", {}) if isinstance(state, dict) else {}
+        updates = []
+        for row_index, changes in edited_rows.items():
+            value = changes.get("corrected_value")
+            index = int(row_index)
+            if value and 0 <= index < len(flagged_fields):
+                updates.append(
+                    {"field_path": flagged_fields[index]["field_path"], "corrected_value": value}
+                )
+        return updates
+
+    def _resolve_document(action, document_id, flagged_fields):
+        """Approve or reject, as an on_click callback. Runs before the
+        script re-executes, so the queue fetch below already reflects it."""
+        payload = {
+            "document_id": document_id,
+            "reviewer": st.session_state.get(f"reviewer_{document_id}") or None,
+        }
+        if action == "approve":
+            payload["field_updates"] = _corrections_for(document_id, flagged_fields)
+
+        try:
+            resp = requests.post(f"{API_BASE}/{action}", json=payload, timeout=30)
+        except requests.RequestException as exc:
+            st.session_state.review_error = f"Could not reach API to {action}: {exc}"
+            return
+
+        if resp.status_code != 200:
+            st.session_state.review_error = f"{action.capitalize()} failed: {resp.text}"
+            return
+
+        st.session_state.resolved_docs.add(document_id)
+        verb = "✅ Approved" if action == "approve" else "❌ Rejected"
+        st.session_state.review_flash = f"{verb} {document_id} — removed from the review queue."
+
+    # Set by the Approve/Reject callbacks below, which run before this line
+    # on the click's own rerun, so the outcome is reported straight away.
+    # The old code called st.success() and then st.rerun() immediately after,
+    # which never painted anything: the rerun throws away the page the
+    # message was written to.
+    if st.session_state.get("review_flash"):
+        st.success(st.session_state.review_flash)
+        st.session_state.review_flash = None
+    if st.session_state.get("review_error"):
+        st.error(st.session_state.review_error)
+        st.session_state.review_error = None
+
+    # No st.rerun() here on purpose. Clicking any button already reruns the
+    # script from the top, which re-fetches the queue below -- that *is* the
+    # refresh. The extra st.rerun() was redundant, and it was what knocked
+    # the nav radio back to the Upload tab.
+    st.button("Refresh queue")
+
+    fetch_ok = True
     try:
         queue_resp = requests.get(f"{API_BASE}/review", timeout=30)
-        queue = queue_resp.json() if queue_resp.status_code == 200 else []
+        if queue_resp.status_code == 200:
+            queue = queue_resp.json()
+        else:
+            st.error(f"Review queue fetch failed: {queue_resp.status_code} — {queue_resp.text}")
+            queue, fetch_ok = [], False
     except requests.RequestException as exc:
         st.error(f"Could not reach API at {API_BASE}: {exc}")
-        queue = []
+        queue, fetch_ok = [], False
+
+    if fetch_ok:
+        # Once the API stops returning a document, the local hide is
+        # redundant -- drop it so the set can't grow without bound and
+        # can't suppress a document that legitimately returns to the queue.
+        returned_ids = {doc["document_id"] for doc in queue}
+        st.session_state.resolved_docs &= returned_ids
+        queue = [doc for doc in queue if doc["document_id"] not in st.session_state.resolved_docs]
 
     if not queue:
         st.info("No documents currently pending review. 🎉")
@@ -219,7 +314,7 @@ else:  # Review Queue
                 flagged_df = pd.DataFrame(doc["flagged_fields"])
                 if not flagged_df.empty:
                     flagged_df["corrected_value"] = ""
-                    edited = st.data_editor(
+                    st.data_editor(
                         flagged_df,
                         key=f"editor_{doc['document_id']}",
                         num_rows="fixed",
@@ -227,54 +322,30 @@ else:  # Review Queue
                     )
                 else:
                     st.caption("None flagged.")
-                    edited = pd.DataFrame(columns=["field_path", "confidence", "corrected_value"])
 
-                reviewer_name = st.text_input("Reviewer name", key=f"reviewer_{doc['document_id']}")
+                st.text_input("Reviewer name", key=f"reviewer_{doc['document_id']}")
 
                 col_approve, col_reject = st.columns([1, 1])
 
+                # Both actions run as on_click callbacks. Streamlit runs a
+                # callback BEFORE re-executing the script, so by the time the
+                # /review fetch above happens on this same click, the approve
+                # or reject has already been committed and the document is
+                # simply no longer in the response. That removes the need for
+                # the st.rerun() these handlers used to end with -- which is
+                # what was resetting the nav radio to the Upload tab.
                 with col_approve:
-                    if st.button("✅ Approve", key=f"approve_{doc['document_id']}"):
-                        field_updates = [
-                            {"field_path": row["field_path"], "corrected_value": row["corrected_value"]}
-                            for _, row in edited.iterrows()
-                            if row.get("corrected_value")
-                        ]
-                        payload = {
-                            "document_id": doc["document_id"],
-                            "field_updates": field_updates,
-                            "reviewer": reviewer_name or None,
-                        }
-                        try:
-                            approve_resp = requests.post(f"{API_BASE}/approve", json=payload, timeout=30)
-                        except requests.RequestException as exc:
-                            st.error(f"Could not reach API to approve: {exc}")
-                            approve_resp = None
-
-                        if approve_resp is None:
-                            pass
-                        elif approve_resp.status_code == 200:
-                            st.success("Approved!")
-                            st.rerun()
-                        else:
-                            st.error(f"Approval failed: {approve_resp.text}")
+                    st.button(
+                        "✅ Approve",
+                        key=f"approve_{doc['document_id']}",
+                        on_click=_resolve_document,
+                        args=("approve", doc["document_id"], doc["flagged_fields"]),
+                    )
 
                 with col_reject:
-                    if st.button("❌ Reject", key=f"reject_{doc['document_id']}"):
-                        payload = {
-                            "document_id": doc["document_id"],
-                            "reviewer": reviewer_name or None,
-                        }
-                        try:
-                            reject_resp = requests.post(f"{API_BASE}/reject", json=payload, timeout=30)
-                        except requests.RequestException as exc:
-                            st.error(f"Could not reach API to reject: {exc}")
-                            reject_resp = None
-
-                        if reject_resp is None:
-                            pass
-                        elif reject_resp.status_code == 200:
-                            st.success("Rejected — removed from the review queue.")
-                            st.rerun()
-                        else:
-                            st.error(f"Rejection failed: {reject_resp.text}")
+                    st.button(
+                        "❌ Reject",
+                        key=f"reject_{doc['document_id']}",
+                        on_click=_resolve_document,
+                        args=("reject", doc["document_id"], doc["flagged_fields"]),
+                    )

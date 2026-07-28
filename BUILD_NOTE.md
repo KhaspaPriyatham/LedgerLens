@@ -17,7 +17,7 @@ startup, no manual setup. Every archived image gets a visible PIL
 watermark before storage. PII (SSN/email/phone) is redacted from every
 log line via a `logging.Filter`, so it can't be bypassed by a call site
 forgetting to scrub. The whole stack is Dockerized with health checks,
-and GitHub Actions runs the 28-test pytest suite as a gate before deploy.
+and GitHub Actions runs the 34-test pytest suite as a gate before deploy.
 
 ## Key decisions
 
@@ -52,12 +52,12 @@ reference material and sit outside this build's definition of done.
 ## Known limitations
 
 - SQLite and the local `uploads/` directory don't survive a Cloud Run
-  container restart or scale-out event — solid for local/Docker-compose,
-  production persistence is a follow-up, not silently glossed over.
-- Reviewer corrections to top-level fields (e.g. vendor) are applied
-  directly; corrections to nested line-item fields are recorded in an
-  audit trail but not yet rewritten into the structured `line_items`
-  array.
+  container restart or scale-out event — solid for local/Docker-compose
+  (where `DATABASE_URL` now correctly points into the persisted
+  `ledgerlens_db` volume, so a `make restart-api` no longer wipes it),
+  but Cloud Run's ephemeral filesystem still means production persistence
+  there is a follow-up (a GCS bucket for images + Cloud SQL or a
+  persisted SQLite file), not silently glossed over.
 - Rolling metrics (`throughput_docs_per_minute`, `auto_approval_rate`)
   are computed in-memory over a bounded deque — correct for a single
   replica; multi-replica deployment would need Redis or Prometheus
@@ -67,15 +67,12 @@ reference material and sit outside this build's definition of done.
   anywhere external — there's no live cloud environment for this build.
   Deploying to Cloud Run, Render, or Railway is documented as the next
   step but wasn't executed from the development environment used here.
-- Reviewer corrections to top-level fields (e.g. vendor) are applied
-  directly; corrections to nested line-item fields are recorded in an
-  audit trail but not yet rewritten into the structured `line_items`
-  array.
-- Rolling metrics (`throughput_docs_per_minute`, `auto_approval_rate`)
-  are computed in-memory over a bounded deque — correct for a single
-  replica; multi-replica deployment would need Redis or Prometheus
-  queries instead.
 - A live `gcloud run deploy` was not executed from the development
   environment (no GCP credentials there); the Dockerfile and workflow
   file are written and locally verified to build correctly, but the
   actual cloud deploy needs real credentials to confirm end-to-end.
+
+See `VALIDATION_PLAN.md` for the full list of issues found in a later
+audit pass (Review Queue image loading, approve/reject visibility,
+Upload-tab state handling, the nested-line-item-correction gap, and the
+SQLite volume mismatch above) and what was done about each.

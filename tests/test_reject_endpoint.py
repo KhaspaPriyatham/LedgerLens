@@ -1,5 +1,7 @@
 from fastapi.testclient import TestClient
 
+from tests.conftest import metric_value
+
 
 def test_reject_removes_document_from_review_queue(monkeypatch, tmp_path):
     import os
@@ -51,15 +53,27 @@ def test_reject_removes_document_from_review_queue(monkeypatch, tmp_path):
         review_resp = client.get("/review")
         assert any(d["document_id"] == doc_id for d in review_resp.json())
 
+        # snapshot the Prometheus counter *before* rejecting -- the shared
+        # registry accumulates across every test in this process, so the
+        # only thing this test can safely assert is that the counter goes
+        # up by exactly 1, not what its absolute value is (see tests/conftest.py).
+        from prometheus_client import generate_latest
+        before = metric_value(
+            generate_latest(main_module.registry).decode("utf-8"),
+            "documents_reviewed_total", outcome="rejected",
+        )
+
         # reject it
         reject_resp = client.post("/reject", json={"document_id": doc_id, "reviewer": "Alice"})
         assert reject_resp.status_code == 200
         assert reject_resp.json()["status"] == "rejected"
 
         # confirm the Prometheus counter for reviewer decisions incremented
-        from prometheus_client import generate_latest
-        metrics_text = generate_latest(main_module.registry).decode("utf-8")
-        assert 'documents_reviewed_total{outcome="rejected"} 1.0' in metrics_text
+        after = metric_value(
+            generate_latest(main_module.registry).decode("utf-8"),
+            "documents_reviewed_total", outcome="rejected",
+        )
+        assert after == before + 1
 
         # confirm it's gone from the review queue
         review_resp_after = client.get("/review")

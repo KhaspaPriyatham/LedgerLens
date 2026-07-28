@@ -31,7 +31,10 @@ def test_low_confidence_field_routes_to_pending_review():
     status, flagged = route(invoice, threshold=0.75)
     assert status == "pending_review"
     assert len(flagged) == 1
-    assert "item0" in flagged[0]["field"]
+    # Machine-parseable path, not the item's own description text -- this is
+    # what /approve parses back out to write corrections into the
+    # structured line_items array (see app/schemas.py low_confidence_fields).
+    assert flagged[0]["field"] == "line_items[0].description"
 
 
 def test_low_overall_confidence_routes_to_pending_review():
